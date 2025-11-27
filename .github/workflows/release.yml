@@ -132,9 +132,9 @@ jobs:
       - name: Create ZIP packages
         run: |
           cd pkg
-          zip gost-linux-amd64-${{ needs.check-version.outputs.version }}.zip gost-amd64
-          zip gost-linux-arm64-${{ needs.check-version.outputs.version }}.zip gost-arm64
-          zip gost-windows-amd64-${{ needs.check-version.outputs.version }}.zip gost-windows-amd64.exe
+          zip gost-linux-amd64.zip gost-amd64
+          zip gost-linux-arm64.zip gost-arm64
+          zip gost-windows-amd64.zip gost-windows-amd64.exe
 
       - name: Generate SHA256 checksums
         run: |
