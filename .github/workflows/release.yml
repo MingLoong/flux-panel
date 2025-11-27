@@ -1,0 +1,278 @@
+name: release.yml
+
+env:
+  VERSION: "1.4.3"
+
+on:
+  push:
+    branches:
+      - main
+      - beta
+
+jobs:
+  check-version:
+    name: Check Version and Decide Build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ env.VERSION }}
+      should_build: ${{ steps.check-tag.outputs.should_build }}
+      should_build_gost: ${{ steps.check-tag.outputs.should_build_gost }}
+      tag_exists: ${{ steps.check-tag.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Display version
+        run: |
+          echo "Current version: ${{ env.VERSION }}"
+
+      - name: Check if tag exists and detect changes
+        id: check-tag
+        run: |
+          if git rev-parse "${{ env.VERSION }}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "should_build=false" >> $GITHUB_OUTPUT
+
+            TAG_COMMIT=$(git rev-list -n 1 "${{ env.VERSION }}")
+
+            if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- go-gost/ 2>/dev/null; then
+              echo "should_build_gost=false" >> $GITHUB_OUTPUT
+            else
+              echo "should_build_gost=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "should_build_gost=true" >> $GITHUB_OUTPUT
+          fi
+
+  build-gost:
+    name: Build & Compress GOST Binary
+    needs: check-version
+    if: needs.check-version.outputs.should_build_gost == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - name: Install UPX
+        run: |
+          wget https://github.com/upx/upx/releases/download/v4.2.1/upx-4.2.1-amd64_linux.tar.xz
+          tar -xf upx-4.2.1-amd64_linux.tar.xz
+          sudo mv upx-4.2.1-amd64_linux/upx /usr/local/bin/
+
+      - name: Build GOST Linux AMD64
+        working-directory: ./go-gost
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o gost-amd64
+
+      - name: Build GOST Linux ARM64
+        working-directory: ./go-gost
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o gost-arm64
+
+      - name: Build GOST Windows AMD64
+        working-directory: ./go-gost
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o gost-windows-amd64.exe
+
+      - name: Compress Linux AMD64
+        working-directory: ./go-gost
+        run: upx --best --lzma gost-amd64
+
+      - name: Compress Linux ARM64
+        working-directory: ./go-gost
+        run: upx --best --lzma gost-arm64
+
+      - name: Compress Windows AMD64
+        working-directory: ./go-gost
+        run: upx --best --lzma gost-windows-amd64.exe || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-binary-amd64
+          path: ./go-gost/gost-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-binary-arm64
+          path: ./go-gost/gost-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-binary-windows-amd64
+          path: ./go-gost/gost-windows-amd64.exe
+
+  package-gost:
+    name: Package GOST Binaries (ZIP + SHA256)
+    needs: build-gost
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-binary-amd64
+          path: pkg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-binary-arm64
+          path: pkg
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-binary-windows-amd64
+          path: pkg
+
+      - name: Create ZIP packages
+        run: |
+          cd pkg
+          zip gost-linux-amd64-${{ needs.check-version.outputs.version }}.zip gost-amd64
+          zip gost-linux-arm64-${{ needs.check-version.outputs.version }}.zip gost-arm64
+          zip gost-windows-amd64-${{ needs.check-version.outputs.version }}.zip gost-windows-amd64.exe
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd pkg
+          sha256sum *.zip > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-packages
+          path: pkg/*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gost-checksums
+          path: pkg/SHA256SUMS.txt
+
+  release:
+    name: Create Github Release and Upload Assets
+    needs: [check-version, package-gost]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-packages
+          path: rel
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-checksums
+          path: rel
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            rel/*.zip
+            rel/SHA256SUMS.txt
+            rel/gost-windows-amd64.exe
+
+# 其余 job 保持不变，只需在 release 阶段新增下载和上传 windows-exe
+
+
+  install-scripts:
+    name: Generate Install Scripts (Linux + Windows)
+    needs: package-gost
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-packages
+          path: scripts/pkg
+
+      - name: Create Linux install.sh
+        run: |
+          cat > install.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "Extracting package..."
+          unzip gost-linux-amd64-*.zip
+          chmod +x gost-amd64
+          sudo mv gost-amd64 /usr/local/bin/gost
+          echo "Installed to /usr/local/bin/gost"
+          EOF
+          chmod +x install.sh
+
+      - name: Create Windows install.bat
+        run: |
+          cat > install.bat << 'EOF'
+          @echo off
+          echo Extracting GOST...
+          powershell -command "Expand-Archive -Force gost-windows-amd64-*.zip ."
+          move gost-windows-amd64.exe gost.exe
+          echo Installed: gost.exe
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: install-scripts
+          path: |
+            install.sh
+            install.bat
+
+  extend-release:
+    name: Attach Install Scripts to Release
+    needs: [release, install-scripts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: install-scripts
+          path: rel2
+
+      - name: Upload scripts to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION }}
+          files: |
+            rel2/install.sh
+            rel2/install.bat
+
+  homebrew:
+    name: Generate Homebrew Formula
+    needs: package-gost
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gost-packages
+          path: hb
+
+      - name: Generate Formula
+        run: |
+          SHA=$(sha256sum hb/gost-linux-amd64-${{ env.VERSION }}.zip | awk '{print $1}')
+          cat > gost.rb << EOF
+          class Gost < Formula
+            desc "GOST proxy tool"
+            homepage "https://github.com/your/repo"
+            url "https://github.com/your/repo/releases/download/${{ env.VERSION }}/gost-linux-amd64-${{ env.VERSION }}.zip"
+            sha256 "${SHA}"
+            def install
+              bin.install "gost-amd64" => "gost"
+            end
+          end
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: gost.rb
+
