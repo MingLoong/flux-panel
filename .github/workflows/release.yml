@@ -24,8 +24,8 @@ jobs:
           fetch-depth: 0
 
       - name: Display version
-        run: echo "Current version: ${{ env.VERSION }}"
-
+        run: |
+          echo "Current version: ${{ env.VERSION }}"
       - name: Check if tag exists and detect changes
         id: check-tag
         run: |
