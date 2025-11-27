@@ -24,8 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Display version
-        run: |
-          echo "Current version: ${{ env.VERSION }}"
+        run: echo "Current version: ${{ env.VERSION }}"
 
       - name: Check if tag exists and detect changes
         id: check-tag
@@ -33,9 +32,7 @@ jobs:
           if git rev-parse "${{ env.VERSION }}" >/dev/null 2>&1; then
             echo "tag_exists=true" >> $GITHUB_OUTPUT
             echo "should_build=false" >> $GITHUB_OUTPUT
-
             TAG_COMMIT=$(git rev-list -n 1 "${{ env.VERSION }}")
-
             if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- go-gost/ 2>/dev/null; then
               echo "should_build_gost=false" >> $GITHUB_OUTPUT
             else
@@ -183,10 +180,6 @@ jobs:
           files: |
             rel/*.zip
             rel/SHA256SUMS.txt
-            rel/gost-windows-amd64.exe
-
-# 其余 job 保持不变，只需在 release 阶段新增下载和上传 windows-exe
-
 
   install-scripts:
     name: Generate Install Scripts (Linux + Windows)
@@ -202,12 +195,12 @@ jobs:
         run: |
           cat > install.sh << 'EOF'
           #!/bin/bash
-          set -e
-          echo "Extracting package..."
-          unzip gost-linux-amd64-*.zip
-          chmod +x gost-amd64
-          sudo mv gost-amd64 /usr/local/bin/gost
-          echo "Installed to /usr/local/bin/gost"
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; fi
+          if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then ARCH="arm64"; fi
+          curl -L "https://github.com/bqlpfy/flux-panel/releases/download/${VERSION}/gost-${ARCH}" -o gost
+          chmod +x gost
+          sudo mv gost /usr/local/bin/gost
           EOF
           chmod +x install.sh
 
@@ -215,10 +208,8 @@ jobs:
         run: |
           cat > install.bat << 'EOF'
           @echo off
-          echo Extracting GOST...
           powershell -command "Expand-Archive -Force gost-windows-amd64-*.zip ."
           move gost-windows-amd64.exe gost.exe
-          echo Installed: gost.exe
           EOF
 
       - uses: actions/upload-artifact@v4
@@ -245,34 +236,3 @@ jobs:
           files: |
             rel2/install.sh
             rel2/install.bat
-
-  homebrew:
-    name: Generate Homebrew Formula
-    needs: package-gost
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: gost-packages
-          path: hb
-
-      - name: Generate Formula
-        run: |
-          SHA=$(sha256sum hb/gost-linux-amd64-${{ env.VERSION }}.zip | awk '{print $1}')
-          cat > gost.rb << EOF
-          class Gost < Formula
-            desc "GOST proxy tool"
-            homepage "https://github.com/your/repo"
-            url "https://github.com/your/repo/releases/download/${{ env.VERSION }}/gost-linux-amd64-${{ env.VERSION }}.zip"
-            sha256 "${SHA}"
-            def install
-              bin.install "gost-amd64" => "gost"
-            end
-          end
-          EOF
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: homebrew-formula
-          path: gost.rb
-
